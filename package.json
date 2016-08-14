@@ -1,0 +1,24 @@
+{
+  "name": "deploy-github",
+  "version": "1.0.0",
+  "description": "deploy-github is manage automatic update of project using github.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hmhmmhm/deploy-github.git"
+  },
+  "keywords": [
+    "github",
+    "automatic-update",
+    "project-updater"
+  ],
+  "author": "hmhmmhm",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/hmhmmhm/deploy-github/issues"
+  },
+  "homepage": "https://github.com/hmhmmhm/deploy-github#readme"
+}
