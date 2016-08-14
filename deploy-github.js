@@ -4,9 +4,22 @@ let url = require('url');
 let http = require('http');
 let https = require('https');
 let admzip = require('adm-zip');
+let readline = require('readline');
 
 let EventEmitter = require('events');
 let events = new EventEmitter();
+
+let Logger = log => {
+    let now = new Date();
+    let timeFormat = String();
+    timeFormat += (String(now.getHours()).length > 1 ? now.getHours() : '0' + now.getHours());
+    timeFormat += ':' + (String(now.getMinutes()).length > 1 ? now.getMinutes() : '0' + now.getMinutes());
+    timeFormat += ':' + (String(now.getSeconds()).length > 1 ? now.getSeconds() : '0' + now.getSeconds()) + "";
+    let defaultFormat = String.fromCharCode(0x1b) + "[34;1m" + "[%time%] " + String.fromCharCode(0x1b) + "[37;1m" + "%log%";
+    console.log(defaultFormat.replace('%time%', timeFormat).replace('%log%', log));
+}
+
+let saveOptions = {};
 
 class DeployGithub {
     static get START_CALLBACK_EVENT() {
@@ -33,17 +46,118 @@ class DeployGithub {
         return "project_download_end_event";
     }
 
+    static get PROJECT_EXTRACT_COMPLETE_EVENT() {
+        return "project_extract_complete_event";
+    }
+
     /**
+     * @param {integer} waitTime
+     * @param {string} branch
      * @param {string} repoUrl
      * @param {string} sourceFolderPath
      * @param {boolean} isNeedDefaultProcess
-     * @param {string} branch
      */
-    static automatic(repoUrl, sourceFolderPath, isNeedDefaultProcess, branch) {
+    static automatic(waitTime, branch, repoUrl, sourceFolderPath, isNeedDefaultProcess) {
+        if (sourceFolderPath === undefined)
+            sourceFolderPath = path.join(process.argv[1], '../');
+
         if (isNeedDefaultProcess == true || isNeedDefaultProcess == undefined) {
             DeployGithub.on(DeployGithub.NEW_VERSION_DETECTED_EVENT,
                 (eventInfo) => {
-                    //TODO
+                    DeployGithub.getNewestGitHubCommit((message, committerName, commitDate) => {
+                        let checkWaitTime = null;
+                        if (typeof(saveOptions[`${eventInfo.repoUrl}:${eventInfo.branch}`]) != 'undefined')
+                            checkWaitTime = saveOptions[`${eventInfo.repoUrl}:${eventInfo.branch}`][waitTime];
+
+                        if (checkWaitTime === 0) {
+                            DeployGithub.downloadWebProjectZip(eventInfo.repoUrl,
+                                eventInfo.branch, eventInfo.sourceFolderPath);
+                            return;
+                        }
+
+                        if (checkWaitTime == null) checkWaitTime = 10000; //milisecond
+
+                        Logger('New updates of the application have been found at Github.');
+                        Logger(`Repository URL: ${eventInfo.repoUrl}, Branch: ${eventInfo.branch}\r\n`);
+
+                        Logger(`Installed Application Version: ${eventInfo.localVersion}`);
+                        Logger(`Update available version of application: ${eventInfo.webVersion}\r\n`);
+
+                        Logger('[Github commit Information]');
+                        Logger(`Message: ${message}`);
+                        Logger(`Comitter: ${committerName}`);
+                        Logger(`CommitDate: ${commitDate}\r\n`);
+
+                        Logger(`If you do not select, it will be launch ${(checkWaitTime/1000)} seconds after automatically.`);
+                        Logger(`If want to update, please enter 'yes'.`);
+                        Logger('(yes/no):');
+
+                        let line = readline.createInterface({
+                            input: process.stdin,
+                            output: process.stdout
+                        });
+
+                        let timerKnock = setTimeout(() => {
+                            grantedCalback();
+                        }, checkWaitTime);
+
+                        let grantedCalback = () => {
+                            clearTimeout(timerKnock);
+                            line.close();
+                            DeployGithub.downloadWebProjectZip(eventInfo.repoUrl,
+                                eventInfo.branch, eventInfo.sourceFolderPath);
+                        };
+                        let deniedCallback = () => {
+                            clearTimeout(timerKnock);
+                            line.close();
+                            events.emit(DeployGithub.START_CALLBACK_EVENT, eventInfo);
+                        };
+
+                        line.on('line', function(input) {
+                            switch (input.toLowerCase()) {
+                                case 'y':
+                                case 'yes':
+                                    grantedCalback();
+                                    break;
+                                case 'n':
+                                case 'no':
+                                    deniedCallback();
+                                    break;
+                                default:
+                                    Logger(`${input} is not correct, please type 'yes' or 'no'.`);
+                                    break;
+                            }
+                        });
+                    });
+                });
+            DeployGithub.on(DeployGithub.PROJECT_DOWNLOAD_START_EVENT,
+                (eventInfo) => {
+                    if (typeof(saveOptions[`${eventInfo.repoUrl}:${eventInfo.branch}`]['automatic']) == 'undefined')
+                        return;
+
+                    if (saveOptions[`${eventInfo.repoUrl}:${eventInfo.branch}`]['automatic'])
+                        Logger(`START THE DOWNLOAD PROJECT FILE... (${eventInfo.repoUrl}:${eventInfo.branch})`);
+                });
+            DeployGithub.on(DeployGithub.PROJECT_DOWNLOAD_END_EVENT,
+                (eventInfo) => {
+                    if (typeof(saveOptions[`${eventInfo.repoUrl}:${eventInfo.branch}`]['automatic']) == 'undefined')
+                        return;
+
+                    if (saveOptions[`${eventInfo.repoUrl}:${eventInfo.branch}`]['automatic']) {
+                        Logger(`START THE EXTRACT PROJECT ZIP... (${eventInfo.repoUrl}:${eventInfo.branch})`);
+                        DeployGithub.extractProjectZip(eventInfo.repoUrl, eventInfo.branch, eventInfo.sourceFolderPath);
+                    }
+                });
+
+            DeployGithub.on(DeployGithub.PROJECT_EXTRACT_COMPLETE_EVENT,
+                (eventInfo) => {
+                    if (typeof(saveOptions[`${eventInfo.repoUrl}:${eventInfo.branch}`]['automatic']) == 'undefined')
+                        return;
+
+                    if (saveOptions[`${eventInfo.repoUrl}:${eventInfo.branch}`]['automatic'])
+                        Logger(`PROJECT UPDATE COMPLETE! (${eventInfo.repoUrl}:${eventInfo.branch})`);
+
+                    events.emit(DeployGithub.START_CALLBACK_EVENT, eventInfo);
                 });
         }
 
@@ -51,7 +165,14 @@ class DeployGithub {
         if (localGitInfo.type != "git") return;
 
         if (repoUrl === undefined) repoUrl = localGitInfo.url;
+
+        if (repoUrl[repoUrl.length - 1] != '/') repoUrl += '/';
         if (branch === undefined) branch = 'master';
+
+        saveOptions[`${repoUrl}:${branch}`] = {
+            waitTime: waitTime,
+            automatic: true
+        };
 
         let webGitInfoCallback = (webGitInfo) => {
             if (webGitInfo.type != "git") return;
@@ -84,9 +205,26 @@ class DeployGithub {
 
     /**
      * @param {function} listener
+     * @param {string} dirname
      */
-    static callback(listener) {
-        DeployGithub.on(DeployGithub.START_CALLBACK_EVENT, listener);
+    static callback(listener, dirname) {
+        let packageJson = require(path.join(dirname, 'package.json'));
+        let url = null;
+
+        if (typeof(packageJson.repository.url) !== 'undefined')
+            url = packageJson.repository.url;
+
+        if (url !== null) {
+            if (url.split('git+').length > 1) url = url.split('git+')[1];
+            if (url.split('.git').length > 1) url = url.split('.git')[0];
+        }
+
+        if (url[url.length - 1] != '/') url += '/';
+
+        DeployGithub.on(DeployGithub.START_CALLBACK_EVENT, (eventInfo) => {
+            if (eventInfo.repoUrl == url)
+                listener(eventInfo);
+        });
     }
 
     /**
@@ -144,9 +282,7 @@ class DeployGithub {
     static getWebGitInfo(repoUrl, branch, callback) {
         DeployGithub.getWebPackageJson(repoUrl, branch, (packageJson) => {
             let type = '',
-                url = '',
                 version = '';
-
             if (typeof(packageJson.repository) != "undefined" &&
                 typeof(packageJson.repository.type) != "undefined") {
                 type = packageJson.repository.type;
@@ -174,6 +310,7 @@ class DeployGithub {
         let type = '',
             version = '';
 
+        if (repoUrl[repoUrl.length - 1] != '/') repoUrl += '/';
         let packageJsonUrl = url.resolve(repoUrl, `${branch}/package.json`);
         let parsedPackageJsonUrl = url.parse(packageJsonUrl);
         let protocol = null;
@@ -196,7 +333,7 @@ class DeployGithub {
                     packageJson += chunk;
                 });
                 response.on('end', () => {
-                    callback(packageJson);
+                    callback(JSON.parse(packageJson)); //TODO
                 });
             });
         }
@@ -207,10 +344,15 @@ class DeployGithub {
      * @param {string} branch
      * @param {string} sourceFolderPath
      */
-    static downloadWebProjectZip(repoUrl, branch, sourceFolderPath, callback) {
-        let projectZipUrl = url.resolve(repoUrl, `archive/${branch}.zip`);
+    static downloadWebProjectZip(repoUrl, branch, sourceFolderPath) {
+        if (repoUrl[repoUrl.length - 1] != '/') repoUrl += '/';
+        let projectZipUrl = url.resolve(repoUrl, `zip/${branch}`);
         let parsedProjectZipUrl = url.parse(projectZipUrl);
         let protocol = null;
+
+        if (fs.existsSync(path.join(sourceFolderPath, `_${branch}.zip`)))
+            fs.unlinkSync(path.join(sourceFolderPath, `_${branch}.zip`));
+
         switch (parsedProjectZipUrl.protocol) {
             case 'http:':
                 protocol = http;
@@ -219,8 +361,8 @@ class DeployGithub {
                 protocol = https;
                 break;
         }
-        parsedProjectZipUrl.host = 'raw.githubusercontent.com';
 
+        parsedProjectZipUrl.host = 'codeload.github.com';
         if (protocol !== null) {
             protocol.get(url.format(parsedProjectZipUrl), (response) => {
                 let eventInfo = {
@@ -233,16 +375,16 @@ class DeployGithub {
 
                 let file = fs.createWriteStream(path.join(sourceFolderPath, `_${branch}.zip`));
                 let contentLength = parseInt(response.headers['content-length'], 10);
-                let currentPercentage = 0;
+                let currentLength = 0;
 
                 response.pipe(file);
 
                 response.on('data', (chunk) => {
-                    currentPercentage += chunk.length;
-                    percentage = (100.0 * (currentPercentage / contentLength)).toFixed(2);
+                    currentLength += chunk.length;
+                    let percentage = (100.0 * (currentLength / contentLength)).toFixed(2);
 
                     events.emit(DeployGithub.PROJECT_DOWNLOAD_PROGRESS_EVENT,
-                        currentPercentage, eventInfo);
+                        percentage, eventInfo);
                 });
 
                 response.on('end', () => {
@@ -262,9 +404,17 @@ class DeployGithub {
      * @param {string} sourceFolderPath
      */
     static extractProjectZip(repoUrl, branch, sourceFolderPath) {
-        let zip = new admzip(name);
-        zip.extractAllTo(sourceFolderPath, true);
-        fs.unlink(path.join(sourceFolderPath, `${branch}.zip`));
+        let zip = new admzip(path.join(sourceFolderPath, `_${branch}.zip`));
+        let zipEntries = zip.getEntries(); // an array of ZipEntry records
+        zip.extractEntryTo(zipEntries[0], sourceFolderPath, false, true);
+        fs.unlink(path.join(sourceFolderPath, `_${branch}.zip`));
+
+        let eventInfo = {
+            repoUrl: repoUrl,
+            sourceFolderPath: sourceFolderPath,
+            branch: branch
+        }
+        events.emit(DeployGithub.PROJECT_EXTRACT_COMPLETE_EVENT, eventInfo);
     }
 
     /**
@@ -277,7 +427,7 @@ class DeployGithub {
      * @param {newestCommitCallback} callback
      */
     static getNewestGitHubCommit(callback) {
-        DeployGithub.getGitHubCommits((body)=>{
+        DeployGithub.getGitHubCommits((body) => {
             callback(body[0].commit.message, body[0].commit.committer.name, body[0].commit.committer.date);
         });
     }

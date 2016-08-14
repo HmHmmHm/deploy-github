@@ -20,5 +20,8 @@
   "bugs": {
     "url": "https://github.com/hmhmmhm/deploy-github/issues"
   },
-  "homepage": "https://github.com/hmhmmhm/deploy-github#readme"
+  "homepage": "https://github.com/hmhmmhm/deploy-github#readme",
+  "dependencies": {
+    "adm-zip": "^0.4.7"
+  }
 }
